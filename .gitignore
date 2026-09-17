@@ -1,0 +1,32 @@
+# ──────────────────────────────────────────────────────────────
+# sec-copilot-cli  —  Git Ignore Rules
+# ──────────────────────────────────────────────────────────────
+
+# Virtual environment
+venv/
+.venv/
+
+# Secrets — NEVER commit
+.env
+
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE / Editor artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
