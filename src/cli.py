@@ -105,10 +105,10 @@ def _handle_log(args: argparse.Namespace) -> None:
 
 
 def _handle_chat(_args: argparse.Namespace) -> None:
-    """Launch an interactive defensive sparring session.
+    """Launch an interactive defensive sparring session with multi-turn memory.
 
-    Runs a REPL loop.  The user can type questions and receive
-    mentored responses.  Type 'exit' or 'quit' to end.
+    Runs a stateful REPL loop where the Gemini client retains context across turns.
+    Type 'exit' or 'quit' to terminate.
     """
     print_banner()
     console.print(
@@ -117,6 +117,8 @@ def _handle_chat(_args: argparse.Namespace) -> None:
     )
 
     client = GeminiClient()
+    # Initialise the stateful multi-turn session with the sparring prompt
+    client.start_chat(mode="chat")
 
     while True:
         try:
@@ -125,17 +127,18 @@ def _handle_chat(_args: argparse.Namespace) -> None:
             console.print("\n[dim]Session ended.[/dim]")
             break
 
-        # Guard — exit commands
+        # Guard Clause: Exit commands
         if user_input.strip().lower() in {"exit", "quit", "q"}:
-            console.print("[dim]Session ended.  Stay safe! 🔐[/dim]")
+            console.print("[dim]Session ended. Stay safe! 🔐[/dim]")
             break
 
-        # Guard — empty input
+        # Guard Clause: Empty input
         if not user_input.strip():
             continue
 
         try:
-            response = client.generate(user_content=user_input, mode="chat")
+            # Send message through the stateful session (memory retained)
+            response = client.send_chat_message(user_input)
             render_assistant_message(response)
         except Exception as exc:  # noqa: BLE001
             render_error(str(exc))
