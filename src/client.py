@@ -153,3 +153,50 @@ class GeminiClient:
             )
 
         return response.text
+
+    # ----------------------------------------------------------
+    # Stateful Chat methods (Conversation Memory)
+    # ----------------------------------------------------------
+
+    def start_chat(self, mode: str = "chat", temperature: float = 0.3) -> None:
+        """Initialise a multi-turn, stateful chat session.
+
+        Args:
+            mode: Prompt mode key for the system persona (default: chat).
+            temperature: Sampling temperature.
+        """
+        system_instruction = get_system_prompt(mode)
+
+        self._chat_session = self._client.chats.create(
+            model=self._model_name,
+            config=types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                safety_settings=SAFETY_SETTINGS,
+                temperature=temperature,
+            )
+        )
+
+    def send_chat_message(self, message: str) -> str:
+        """Send a message within the active stateful session.
+
+        Raises:
+            RuntimeError: If called before start_chat() or if response is blocked.
+        """
+        # Guard clause — ensure the Instance exists
+        if not hasattr(self, '_chat_session') or not self._chat_session:
+            raise RuntimeError("Chat session not initialized. Call start_chat() first.")
+
+        # Guard clause — empty input
+        if not message or not message.strip():
+            raise ValueError("Message must not be empty.")
+
+        response = self._chat_session.send_message(message)
+
+        # Guard clause — blocked or empty response
+        if not response.text:
+            raise RuntimeError(
+                "Gemini returned an empty response in chat. "
+                "The request may have been blocked by safety filters."
+            )
+
+        return response.text
