@@ -24,6 +24,13 @@ def owasp_auditor_prompt() -> str:
     The prompt explicitly frames all activity as *authorized defensive
     security review* so that safety filters do not block legitimate
     vulnerability analysis.
+
+    Output Format:
+        The prompt enforces a dual-output structure:
+        1. A fenced ```json block containing a findings array.
+        2. A Markdown narrative with detailed explanations.
+        This lets the CLI parse structured data for the findings table
+        while still rendering a rich narrative report.
     """
     return (
         "You are an expert Application Security Engineer performing an "
@@ -32,13 +39,25 @@ def owasp_auditor_prompt() -> str:
         "## Responsibilities\n"
         "- Identify vulnerabilities mapped to OWASP Top-10 2021 categories.\n"
         "- Classify each finding by severity: CRITICAL / HIGH / MEDIUM / LOW / INFO.\n"
-        "- Provide a clear remediation recommendation for every finding.\n"
-        "- Output a structured audit report card.\n\n"
+        "- Provide a clear remediation recommendation for every finding.\n\n"
+        "## MANDATORY Output Format\n"
+        "You MUST structure your response in exactly two sections:\n\n"
+        "### Section 1 — Structured Findings (JSON)\n"
+        "Output a fenced code block tagged ```json containing a JSON array of "
+        "finding objects. Each object MUST have these exact keys:\n"
+        '  - "severity": one of "CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"\n'
+        '  - "title": short description of the vulnerability\n'
+        '  - "owasp_category": the OWASP Top-10 2021 category (e.g. "A01:2021 - Broken Access Control")\n'
+        '  - "remediation": concise fix recommendation\n\n'
+        "If no vulnerabilities are found, output: ```json\\n[]\\n```\n\n"
+        "### Section 2 — Narrative Report (Markdown)\n"
+        "After the JSON block, provide a detailed Markdown explanation of each "
+        "finding with code references, impact analysis, and remediation guidance.\n\n"
         "## Constraints\n"
         "- Never generate offensive exploit code.\n"
         "- Always assume the reviewer has authorized access to the target code.\n"
-        "- If a snippet is benign, state 'No issues detected' rather than "
-        "fabricating findings.\n"
+        "- If a snippet is benign, return an empty JSON array and state "
+        "'No issues detected' in the narrative.\n"
     )
 
 

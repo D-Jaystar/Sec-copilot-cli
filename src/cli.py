@@ -12,6 +12,11 @@ Architecture Decision:
     operational modes.  Each subcommand handler is a standalone function
     that follows the Guard-Clause / Early-Return pattern.
 
+    All API calls are wrapped in try/except blocks that catch network
+    errors, timeouts, rate limits, and auth failures — routing every
+    exception through formatter.render_error() so the CLI never dumps
+    raw Python tracebacks into the terminal.
+
 Usage:
     python -m src.cli audit  <file>       — Run OWASP static audit
     python -m src.cli log    <file>       — Analyse a log file for IOCs
@@ -31,7 +36,65 @@ from src.formatter import (
     render_assistant_message,
     render_audit_report,
     render_error,
+    render_findings_table,
 )
+
+
+# ──────────────────────────────────────────────────────────────
+# Shared error handling helper
+# ──────────────────────────────────────────────────────────────
+
+def _classify_api_error(exc: Exception) -> str:
+    """Convert a raw exception into a user-friendly error message.
+
+    Maps common Gemini / network error patterns to actionable
+    descriptions so the user knows what went wrong and how to fix it.
+
+    Args:
+        exc: The caught exception.
+
+    Returns:
+        A human-readable error string for render_error().
+    """
+    msg = str(exc).lower()
+
+    # Guard — rate limit (HTTP 429)
+    if "429" in msg or "rate limit" in msg or "resource exhausted" in msg:
+        return (
+            "Rate limit exceeded.  Gemini is throttling requests.\n"
+            "Wait a minute and try again, or upgrade your API plan."
+        )
+
+    # Guard — authentication / permission (HTTP 401/403)
+    if "401" in msg or "403" in msg or "permission" in msg or "api key" in msg:
+        return (
+            "Authentication failed.  Your GEMINI_API_KEY may be invalid "
+            "or expired.\nVerify your key at https://aistudio.google.com/apikey"
+        )
+
+    # Guard — timeout
+    if "timeout" in msg or "timed out" in msg:
+        return (
+            "Request timed out.  The Gemini API did not respond in time.\n"
+            "Check your internet connection and try again."
+        )
+
+    # Guard — connection / DNS failures
+    if "connection" in msg or "dns" in msg or "unreachable" in msg:
+        return (
+            "Network error — could not reach the Gemini API.\n"
+            "Check your internet connection or proxy settings."
+        )
+
+    # Guard — model not found (HTTP 404)
+    if "404" in msg or "not found" in msg and "model" in msg:
+        return (
+            "Model not found.  The configured model name may be invalid.\n"
+            "Check the GEMINI_MODEL env var or the DEFAULT_MODEL constant."
+        )
+
+    # Fallback — return the original message
+    return f"API error: {exc}"
 
 
 # ──────────────────────────────────────────────────────────────
@@ -42,7 +105,8 @@ def _handle_audit(args: argparse.Namespace) -> None:
     """Run OWASP-aligned static-code audit on a source file.
 
     Guard clauses verify the file exists and is non-empty before
-    sending to Gemini.
+    sending to Gemini.  The response is split into structured
+    findings (table) and a narrative report (Markdown panel).
     """
     filepath = Path(args.file)
 
@@ -61,19 +125,33 @@ def _handle_audit(args: argparse.Namespace) -> None:
         f"[bold cyan]🔍  Auditing:[/bold cyan] {filepath.name}\n"
     )
 
-    client = GeminiClient()
-    report = client.generate(
-        user_content=f"Audit the following source code:\n\n```\n{code}\n```",
-        mode="audit",
-    )
-    render_audit_report(report)
+    try:
+        client = GeminiClient()
+        findings, narrative = client.generate_audit(
+            user_content=f"Audit the following source code:\n\n```\n{code}\n```",
+        )
+    except SystemExit:
+        # Re-raise SystemExit from GeminiClient.__init__ (missing API key)
+        raise
+    except Exception as exc:  # noqa: BLE001
+        render_error(_classify_api_error(exc))
+        sys.exit(1)
+
+    # Render structured findings table (may be empty on clean code)
+    render_findings_table(findings)
+
+    # Render the narrative Markdown report
+    if narrative:
+        console.print()  # visual separator
+        render_audit_report(narrative)
 
 
 def _handle_log(args: argparse.Namespace) -> None:
     """Analyse a security-event log file for IOCs and anomalies.
 
     Guard clauses mirror the audit handler — verify existence and
-    non-emptiness.
+    non-emptiness.  API errors are caught and routed through
+    render_error().
     """
     filepath = Path(args.file)
 
@@ -92,23 +170,34 @@ def _handle_log(args: argparse.Namespace) -> None:
         f"[bold cyan]📋  Analysing log:[/bold cyan] {filepath.name}\n"
     )
 
-    client = GeminiClient()
-    analysis = client.generate(
-        user_content=(
-            "Analyse the following security event log for IOCs, anomalies, "
-            "and potential attack timelines:\n\n"
-            f"```\n{log_data}\n```"
-        ),
-        mode="log",
-    )
+    try:
+        client = GeminiClient()
+        analysis = client.generate(
+            user_content=(
+                "Analyse the following security event log for IOCs, anomalies, "
+                "and potential attack timelines:\n\n"
+                f"```\n{log_data}\n```"
+            ),
+            mode="log",
+        )
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        render_error(_classify_api_error(exc))
+        sys.exit(1)
+
     render_audit_report(analysis)
 
 
 def _handle_chat(_args: argparse.Namespace) -> None:
     """Launch an interactive defensive sparring session with multi-turn memory.
 
-    Runs a stateful REPL loop where the Gemini client retains context across turns.
-    Type 'exit' or 'quit' to terminate.
+    Runs a stateful REPL loop where the Gemini client retains context
+    across turns.  Type 'exit' or 'quit' to terminate.
+
+    API errors during session init abort the CLI.  Errors during
+    individual messages are displayed inline without killing the session
+    so the user can retry.
     """
     print_banner()
     console.print(
@@ -116,9 +205,15 @@ def _handle_chat(_args: argparse.Namespace) -> None:
         "Type [bold]exit[/bold] or [bold]quit[/bold] to end.\n[/dim]"
     )
 
-    client = GeminiClient()
-    # Initialise the stateful multi-turn session with the sparring prompt
-    client.start_chat(mode="chat")
+    # --- Initialise client and stateful session ---
+    try:
+        client = GeminiClient()
+        client.start_chat(mode="chat")
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        render_error(_classify_api_error(exc))
+        sys.exit(1)
 
     while True:
         try:
@@ -127,21 +222,21 @@ def _handle_chat(_args: argparse.Namespace) -> None:
             console.print("\n[dim]Session ended.[/dim]")
             break
 
-        # Guard Clause: Exit commands
+        # Guard — exit commands
         if user_input.strip().lower() in {"exit", "quit", "q"}:
-            console.print("[dim]Session ended. Stay safe! 🔐[/dim]")
+            console.print("[dim]Session ended.  Stay safe! 🔐[/dim]")
             break
 
-        # Guard Clause: Empty input
+        # Guard — empty input
         if not user_input.strip():
             continue
 
         try:
-            # Send message through the stateful session (memory retained)
             response = client.send_chat_message(user_input)
             render_assistant_message(response)
         except Exception as exc:  # noqa: BLE001
-            render_error(str(exc))
+            # Display error inline but keep session alive for retry
+            render_error(_classify_api_error(exc))
 
 
 # ──────────────────────────────────────────────────────────────

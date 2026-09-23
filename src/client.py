@@ -16,7 +16,9 @@ Architecture Decision:
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sys
 from typing import Optional
 
@@ -200,3 +202,71 @@ class GeminiClient:
             )
 
         return response.text
+
+    # ----------------------------------------------------------
+    # Structured audit generation (JSON + Markdown)
+    # ----------------------------------------------------------
+
+    @staticmethod
+    def _extract_json_block(text: str) -> str | None:
+        """Extract the first fenced ```json block from *text*.
+
+        Returns:
+            The raw JSON string inside the fence, or None if not found.
+        """
+        # Match ```json ... ``` across multiple lines (non-greedy)
+        match = re.search(r"```json\s*\n(.*?)```", text, re.DOTALL)
+        if not match:
+            return None
+        return match.group(1).strip()
+
+    def generate_audit(
+        self,
+        user_content: str,
+        *,
+        temperature: float = 0.3,
+    ) -> tuple[list[dict[str, str]], str]:
+        """Run a structured audit and return parsed findings + narrative.
+
+        Calls ``generate()`` in audit mode, then splits the response into:
+          1. A list of finding dicts (parsed from the ```json block).
+          2. The remaining Markdown narrative.
+
+        Args:
+            user_content: The source code wrapped in a prompt.
+            temperature:  Sampling temperature.
+
+        Returns:
+            A tuple of (findings_list, narrative_markdown).
+            If JSON parsing fails, findings_list is empty and the full
+            response is returned as narrative (graceful degradation).
+        """
+        raw_response = self.generate(
+            user_content=user_content,
+            mode="audit",
+            temperature=temperature,
+        )
+
+        # --- Attempt to extract structured JSON ---
+        json_str = self._extract_json_block(raw_response)
+
+        # Guard clause — no JSON block found → graceful degradation
+        if not json_str:
+            return [], raw_response
+
+        try:
+            findings = json.loads(json_str)
+        except (json.JSONDecodeError, TypeError):
+            # Guard clause — malformed JSON → treat entire response as narrative
+            return [], raw_response
+
+        # Guard clause — Gemini returned something other than a list
+        if not isinstance(findings, list):
+            return [], raw_response
+
+        # Strip the JSON fence from the narrative so it renders cleanly
+        narrative = re.sub(
+            r"```json\s*\n.*?```\s*\n?", "", raw_response, count=1, flags=re.DOTALL
+        ).strip()
+
+        return findings, narrative
